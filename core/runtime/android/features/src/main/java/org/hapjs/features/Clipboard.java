@@ -33,7 +33,7 @@ public class Clipboard extends FeatureExtension {
 
     protected static final String PARAM_KEY_TEXT = "text";
 
-    protected ClipboardManager mClipboard;
+    protected volatile ClipboardManager mClipboard;
 
     @Override
     protected Response invokeInner(final Request request) throws Exception {
