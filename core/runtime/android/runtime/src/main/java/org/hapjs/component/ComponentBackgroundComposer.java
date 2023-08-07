@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the hapjs-platform Project Contributors
+ * Copyright (c) 2021-present, the hapjs-platform Project Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -8,6 +8,7 @@ package org.hapjs.component;
 import android.content.Context;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
@@ -22,6 +23,7 @@ import com.facebook.common.references.CloseableReference;
 import com.facebook.drawee.components.DeferredReleaser;
 import com.facebook.imagepipeline.image.CloseableBitmap;
 import java.lang.ref.SoftReference;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -67,7 +69,7 @@ public class ComponentBackgroundComposer {
     }
 
     public void setBackgroundColor(String color) {
-        int c = ColorUtil.getColor(color);
+        int c = ColorUtil.getColor(color, Color.TRANSPARENT);
         setBackgroundColor(c);
     }
 
@@ -79,8 +81,13 @@ public class ComponentBackgroundComposer {
     }
 
     public void setBackgroundImage(String img) {
+        setBackgroundImage(img, false);
+    }
+
+    public void setBackgroundImage(String img, boolean setBlur) {
         if (!TextUtils.equals(mParameter.mBackgroundImg, img)) {
             mParameter.mBackgroundImg = img;
+            mParameter.mSetBackgroundBlur = setBlur;
             mDirty = true;
         }
     }
@@ -218,14 +225,14 @@ public class ComponentBackgroundComposer {
             } else {
                 if (TextUtils.equals(imgUri.getScheme(), "http")
                         || TextUtils.equals(imgUri.getScheme(), "https")) {
-                    doFetchBitmap(imgUri, mParameter.mBackgroundImg);
+                    doFetchBitmap(imgUri, mParameter.mBackgroundImg, mParameter.mSetBackgroundBlur);
                 } else {
                     Executors.io()
                             .execute(
                                     new Runnable() {
                                         @Override
                                         public void run() {
-                                            doFetchBitmap(imgUri, mParameter.mBackgroundImg);
+                                            doFetchBitmap(imgUri, mParameter.mBackgroundImg, mParameter.mSetBackgroundBlur);
                                         }
                                     });
                 }
@@ -260,6 +267,11 @@ public class ComponentBackgroundComposer {
         if (isLayerDrawableValid()) {
             List<Drawable> drawables = new ArrayList<>();
 
+            // Avoid default background of some component not work, e.g button.
+            if (getDefaultBgDrawable() != null) {
+                drawables.add(getDefaultBgDrawable());
+            }
+
             if (mImageDrawable != null) {
                 tryDelayedBgTransition();
                 drawables.add(transformDrawable(mImageDrawable));
@@ -268,13 +280,6 @@ public class ComponentBackgroundComposer {
             if (mGradientDrawable != null) {
                 tryDelayedBgTransition();
                 drawables.add(transformDrawable(mGradientDrawable));
-            }
-            // Avoid default background of some component not work, e.g button.
-            if (mParameter.mBackgroundColor == 0 && mImageDrawable == null
-                    && mGradientDrawable == null) {
-                if (getDefaultBgDrawable() != null) {
-                    drawables.add(0, getDefaultBgDrawable());
-                }
             }
 
             Drawable[] tmp = new Drawable[drawables.size()];
@@ -327,43 +332,71 @@ public class ComponentBackgroundComposer {
     }
 
     private void doFetchBitmap(final Uri backgroundUri, final String originBgImgStr) {
+        doFetchBitmap(backgroundUri, originBgImgStr, false);
+    }
+
+    private void doFetchBitmap(final Uri backgroundUri, final String originBgImgStr, boolean setBlur) {
         if (backgroundUri == null || originBgImgStr == null) {
             return;
         }
         mBackgroundHolder.setRequestSubmitted(true);
         // 按照图片原有尺寸获取
-        BitmapUtils.fetchBitmap(
-                backgroundUri,
-                new BitmapUtils.BitmapLoadCallback() {
-                    @Override
-                    public void onLoadSuccess(CloseableReference reference, Bitmap bitmap) {
-                        if (bitmap != null
-                                && mComponent != null
-                                && originBgImgStr.equals(mParameter.mBackgroundImg)) {
-                            Resources resources = null;
-                            Context context = mComponent.mContext;
-                            if (context != null) {
-                                resources = context.getResources();
-                            }
-                            if (resources != null) {
-                                mImageDrawable = new BitmapDrawable(resources, bitmap);
-                            } else {
-                                mImageDrawable = new BitmapDrawable(bitmap);
-                            }
-                            mBackgroundHolder.setCloseableReference(backgroundUri, reference);
-                            applyDrawable();
-                        }
-                    }
+        BitmapUtils.fetchBitmap(backgroundUri,
+                new BitmapLoadCallback(this, backgroundUri, originBgImgStr),
+                0, 0, setBlur);
+    }
 
-                    @Override
-                    public void onLoadFailure() {
-                        Log.e(TAG, "onLoadFailure backgroundUrl:" + backgroundUri.toString());
-                        mImageDrawable = null;
-                        applyDrawable();
-                    }
-                },
-                0,
-                0);
+    private static class BitmapLoadCallback implements BitmapUtils.BitmapLoadCallback {
+        private WeakReference<ComponentBackgroundComposer> mBackgroundComposerRef;
+        private Uri mBackgroundUri;
+        private String mOriginBgImgStr;
+
+        public BitmapLoadCallback(ComponentBackgroundComposer backgroundComposer,
+                                  Uri backgroundUri, String originBgImgStr) {
+            mBackgroundComposerRef = new WeakReference<>(backgroundComposer);
+            mBackgroundUri = backgroundUri;
+            mOriginBgImgStr = originBgImgStr;
+        }
+
+        @Override
+        public void onLoadSuccess(CloseableReference reference, Bitmap bitmap) {
+            ComponentBackgroundComposer backgroundComposer = mBackgroundComposerRef.get();
+            if (backgroundComposer != null) {
+                backgroundComposer.onLoadBitmapSuccess(reference, bitmap, mBackgroundUri, mOriginBgImgStr);
+            }
+        }
+
+        @Override
+        public void onLoadFailure() {
+            ComponentBackgroundComposer backgroundComposer = mBackgroundComposerRef.get();
+            if (backgroundComposer != null) {
+                backgroundComposer.onLoadBitmapFailure(mBackgroundUri);
+            }
+        }
+    }
+
+    private void onLoadBitmapSuccess(CloseableReference reference, Bitmap bitmap, Uri backgroundUri, String originBgImgStr) {
+        if (bitmap != null && mComponent != null
+                && originBgImgStr.equals(mParameter.mBackgroundImg)) {
+            Resources resources = null;
+            Context context = mComponent.mContext;
+            if (context != null) {
+                resources = context.getResources();
+            }
+            if (resources != null) {
+                mImageDrawable = new BitmapDrawable(resources, bitmap);
+            } else {
+                mImageDrawable = new BitmapDrawable(bitmap);
+            }
+            mBackgroundHolder.setCloseableReference(backgroundUri, reference);
+            applyDrawable();
+        }
+    }
+
+    private void onLoadBitmapFailure(Uri backgroundUri) {
+        Log.e(TAG, "onLoadFailure backgroundUrl:" + backgroundUri.toString());
+        mImageDrawable = null;
+        applyDrawable();
     }
 
     public void releaseDrawable() {
@@ -558,6 +591,7 @@ public class ComponentBackgroundComposer {
     private static class Parameter {
         int mBackgroundColor;
         String mBackgroundImg;
+        boolean mSetBackgroundBlur;
         String mBackgroundSize;
         String mBackgroundRepeatMode;
         String mBackgroundPosition;

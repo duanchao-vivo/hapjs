@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the hapjs-platform Project Contributors
+ * Copyright (c) 2021-present, the hapjs-platform Project Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -14,18 +14,28 @@ import org.hapjs.bridge.AppInfoProvider;
 import org.hapjs.bridge.ApplicationProvider;
 import org.hapjs.bridge.DefaultAppInfoProvider;
 import org.hapjs.bridge.DefaultApplicationProvider;
+import org.hapjs.bridge.DefaultFitWidescreenProvider;
 import org.hapjs.bridge.DependencyManager;
+import org.hapjs.bridge.FitWidescreenProvider;
 import org.hapjs.bridge.annotation.DependencyAnnotation;
+import org.hapjs.bridge.provider.webview.WebviewSettingProvider;
+import org.hapjs.bridge.provider.webview.WebviewSettingProviderImpl;
 import org.hapjs.cache.DefaultInstallInterceptProviderImpl;
 import org.hapjs.cache.DefaultPackageCheckProvider;
 import org.hapjs.cache.InstallInterceptProvider;
 import org.hapjs.cache.PackageCheckProvider;
 import org.hapjs.common.net.UserAgentHelper;
+import org.hapjs.common.utils.DefaultStatusBarSizeProvider;
 import org.hapjs.common.utils.FrescoUtils;
 import org.hapjs.common.utils.ProcessUtils;
 import org.hapjs.common.utils.SoLoaderHelper;
+import org.hapjs.common.utils.StatusBarSizeProvider;
+import org.hapjs.component.constants.DefaultFontSizeProvider;
+import org.hapjs.component.constants.FontSizeProvider;
 import org.hapjs.pm.DefaultNativePackageProviderImpl;
 import org.hapjs.pm.NativePackageProvider;
+import org.hapjs.render.DefaultFontFamilyProvider;
+import org.hapjs.render.FontFamilyProvider;
 import org.hapjs.render.jsruntime.Profiler;
 import org.hapjs.system.DefaultSysOpProviderImpl;
 import org.hapjs.system.SysOpProvider;
@@ -150,12 +160,18 @@ public class Runtime {
         pm.addProvider(NativePackageProvider.NAME, new DefaultNativePackageProviderImpl());
         pm.addProvider(ApplicationProvider.NAME, new DefaultApplicationProvider());
         pm.addProvider(AppInfoProvider.NAME, new DefaultAppInfoProvider());
+        pm.addProvider(FitWidescreenProvider.NAME, new DefaultFitWidescreenProvider());
         pm.addProvider(PackageCheckProvider.NAME, new DefaultPackageCheckProvider());
         pm.addProvider(ThemeProvider.NAME, new DefaultThemeProvider());
         ProviderManager.getDefault()
                 .addProvider(InstallInterceptProvider.NAME,
                         new DefaultInstallInterceptProviderImpl());
+        pm.addProvider(RouterManageProvider.NAME, new DefaultRouterManageProvider());
         pm.addProvider(HybridDialogProvider.NAME, new DefaultHybridDialogProviderImpl());
+        pm.addProvider(StatusBarSizeProvider.NAME, new DefaultStatusBarSizeProvider());
+        pm.addProvider(FontSizeProvider.NAME, new DefaultFontSizeProvider());
+        pm.addProvider(FontFamilyProvider.NAME, new DefaultFontFamilyProvider());
+        pm.addProvider(WebviewSettingProvider.NAME, new WebviewSettingProviderImpl());
         if (!mLazyLoad) {
             load();
         }
@@ -164,7 +180,6 @@ public class Runtime {
     private void load() {
         UserAgentHelper.preLoad();
         FrescoUtils.initializeAsync(mContext);
-        SoLoaderHelper.initialize(mContext);
         mContext.registerComponentCallbacks(
                 new ComponentCallbacks2() {
                     @Override

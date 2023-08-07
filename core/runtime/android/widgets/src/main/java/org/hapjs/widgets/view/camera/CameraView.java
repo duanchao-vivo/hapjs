@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the hapjs-platform Project Contributors
+ * Copyright (c) 2021-present, the hapjs-platform Project Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -18,6 +18,7 @@ import android.graphics.YuvImage;
 import android.hardware.Camera;
 import android.hardware.SensorManager;
 import android.net.Uri;
+import android.opengl.GLSurfaceView;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -65,13 +66,15 @@ import org.hapjs.component.bridge.RenderEventCallback;
 import org.hapjs.component.view.ComponentHost;
 import org.hapjs.component.view.keyevent.KeyEventDelegate;
 import org.hapjs.render.Page;
+import org.hapjs.runtime.ConfigurationManager;
+import org.hapjs.runtime.HapConfiguration;
 import org.hapjs.widgets.view.camera.googlecameraview.AspectRatio;
 import org.hapjs.widgets.view.camera.googlecameraview.Constants;
 import org.hapjs.widgets.view.camera.googlecameraview.Size;
 import org.hapjs.widgets.view.camera.googlecameraview.SizeMap;
 import org.json.JSONException;
 
-public class CameraView extends FrameLayout implements ComponentHost {
+public class CameraView extends FrameLayout implements ComponentHost, ConfigurationManager.ConfigurationListener  {
     public static final int CAMERA_OK = 200;
     public static final int CAMERA_ERROR = 201;
     public static final int CAMERA_TAKEPHOTO_ERROR = 202;
@@ -185,6 +188,7 @@ public class CameraView extends FrameLayout implements ComponentHost {
     private boolean mIsInit = false;
     private boolean mIsCameraDestroy;
     private int curTakePhotoOrientation = 0;
+    public volatile boolean mIsCamervalid = true;
     /**
      * This is either Surface.Rotation_0, _90, _180, _270, or -1 (invalid).
      */
@@ -293,13 +297,25 @@ public class CameraView extends FrameLayout implements ComponentHost {
         mSurfaceView = mCameraBaseMode.getModeView(mContext, this);
         if (!mIsInit) {
             mCameraBaseMode.initCameraMode();
-            initOrientation();
+            initListener();
             mIsInit = true;
         }
         checkCameraPermission();
     }
 
+    private void initListener() {
+        initOrientation();
+        ConfigurationManager.getInstance().addListener(this);
+    }
+
     public void takePhoto(OnPhotoTakeListener onPhotoTakeListener) {
+        if (!mIsHasPermission) {
+            if (null != mOnCameraPermissionListener) {
+                mOnCameraPermissionListener.onCameraFailure("camera permission deny.");
+            }
+            Log.w(TAG, "takePhoto mIsHasPermission false.");
+            return;
+        }
         this.mOnPhotoTakeListener = onPhotoTakeListener;
         if (mCamera != null) {
             curDisplayOri = ((Activity) mContext).getRequestedOrientation();
@@ -349,6 +365,13 @@ public class CameraView extends FrameLayout implements ComponentHost {
 
     public void startRecord(
             OnVideoRecordListener onVideoRecordListener, int maxDuration, boolean compressed) {
+        if (!mIsHasPermission) {
+            if (null != mOnCameraPermissionListener) {
+                mOnCameraPermissionListener.onCameraFailure("camera permission deny.");
+            }
+            Log.w(TAG, "startRecord mIsHasPermission false.");
+            return;
+        }
         setVideoAutoFocus(true);
         if (null != mCameraBaseMode
                 && org.hapjs.widgets.Camera.CAMERA_VIDEORECORD_MODE.equals(mCameraMode)) {
@@ -964,12 +987,19 @@ public class CameraView extends FrameLayout implements ComponentHost {
     }
 
     public void onActivityPause() {
+        mIsCamervalid = false;
         if (null != mCameraBaseMode && mIsHasPermission && !mIsNeedResume) {
+            Log.d(TAG, CameraBaseMode.VIDEO_RECORD_TAG + "onActivityPause valid.");
             mIsNeedResume = true;
             mCameraBaseMode.onActivityPause();
         } else {
-            Log.e(TAG,
-                    CameraBaseMode.VIDEO_RECORD_TAG + "onActivityPause mCameraBaseMode is null.");
+            if (mSurfaceView instanceof GLSurfaceView) {
+                Log.d(TAG, CameraBaseMode.VIDEO_RECORD_TAG + "onActivityPause else valid.");
+                ((GLSurfaceView) mSurfaceView).onPause();
+            }
+            Log.e(TAG, CameraBaseMode.VIDEO_RECORD_TAG + "onActivityPause mCameraBaseMode is null or no permission or mIsNeedResume true"
+                    + " mIsHasPermission : " + mIsHasPermission
+                    + " mIsNeedResume : " + mIsNeedResume);
         }
     }
 
@@ -983,6 +1013,7 @@ public class CameraView extends FrameLayout implements ComponentHost {
     public void onActivityResume() {
         if (null != mCameraBaseMode && mIsHasPermission) {
             mIsNeedResume = false;
+            mIsCamervalid = true;
             mCameraBaseMode.onActivityResume();
         }
     }
@@ -1012,7 +1043,7 @@ public class CameraView extends FrameLayout implements ComponentHost {
                             }
 
                             @Override
-                            public void onPermissionReject(int reason) {
+                            public void onPermissionReject(int reason, boolean dontDisturb) {
                                 CameraView.this.post(
                                         new Runnable() {
                                             @Override
@@ -1247,15 +1278,17 @@ public class CameraView extends FrameLayout implements ComponentHost {
         if (null != mCameraBaseMode) {
             mCameraBaseMode.onBackAttachCameraMode();
         }
-        initOrientation();
+        initListener();
     }
 
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
+        Log.d(TAG, CameraBaseMode.VIDEO_RECORD_TAG + " onDetachedFromWindow");
         onActivityPause();
         // stopRecord(null);
         disableOrientationListener();
+        ConfigurationManager.getInstance().removeListener(this);
         mIsInit = false;
         mIsNeedClose = true;
         setFlashLightMode(mFlash);
@@ -1416,7 +1449,12 @@ public class CameraView extends FrameLayout implements ComponentHost {
             // info.orientation  横竖屏相关
             // 相机 横屏 0  竖屏 90  逆向横屏 180  逆向竖屏 270
             Camera.CameraInfo info = new Camera.CameraInfo();
-            Camera.getCameraInfo(mCameraId, info);
+            try {
+                Camera.getCameraInfo(mCameraId, info);
+            } catch (RuntimeException e) {
+                Log.e(TAG, "getDisplayOrientation RuntimeException error : " + e.getMessage());
+                return result;
+            }
             // 竖屏 0  横屏 90  逆向竖屏 180  逆向横屏 270
             int rotation = mDisplay.getRotation();
             int degrees = 0;
@@ -1939,6 +1977,13 @@ public class CameraView extends FrameLayout implements ComponentHost {
          * Called when camera init done
          */
         void onCameraInitDone(HashMap<String, Object> datas);
+    }
+
+    @Override
+    public void onConfigurationChanged(HapConfiguration newConfig) {
+        if (mIsHasPermission && mDisplayOrientation != getDisplayOrientation(false)) {
+            refreshDisplayOrientation();
+        }
     }
 
     private final class TakePictureCallback implements Camera.PictureCallback {

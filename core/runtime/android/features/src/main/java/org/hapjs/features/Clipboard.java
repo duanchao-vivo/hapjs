@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the hapjs-platform Project Contributors
+ * Copyright (c) 2021-present, the hapjs-platform Project Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,6 +13,9 @@ import org.hapjs.bridge.Request;
 import org.hapjs.bridge.Response;
 import org.hapjs.bridge.annotation.ActionAnnotation;
 import org.hapjs.bridge.annotation.FeatureExtensionAnnotation;
+
+import org.hapjs.common.executors.Executor;
+import org.hapjs.common.executors.Executors;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -30,21 +33,28 @@ public class Clipboard extends FeatureExtension {
 
     protected static final String PARAM_KEY_TEXT = "text";
 
-    protected ClipboardManager mClipboard;
+    protected volatile ClipboardManager mClipboard;
 
     @Override
     protected Response invokeInner(final Request request) throws Exception {
         if (mClipboard == null) {
-            Context context = request.getNativeInterface().getActivity();
-            mClipboard =
-                    (ClipboardManager) context
-                            .getSystemService(Context.CLIPBOARD_SERVICE);
-            try {
-                invokeInner(request);
-            } catch (Exception e) {
-                request.getCallback()
-                        .callback(getExceptionResponse(request, e));
-            }
+            // android 7上ClipboardManager需要在ui线程获取
+            Executors.ui().execute(() -> {
+                if (mClipboard == null) {
+                    Context context = request.getNativeInterface().getActivity();
+                    mClipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+                }
+
+                Executor executor = getExecutor(request);
+                executor = executor == null ? Executors.io() : executor;
+                executor.execute(() -> {
+                    try {
+                        invokeInner(request);
+                    } catch (Exception e) {
+                        request.getCallback().callback(getExceptionResponse(request, e));
+                    }
+                });
+            });
         } else {
             String action = request.getAction();
             if (ACTION_SET.equals(action)) {
@@ -52,6 +62,7 @@ public class Clipboard extends FeatureExtension {
             } else {
                 get(request);
             }
+            recordClipboardFeature(request);
         }
         return Response.SUCCESS;
     }
@@ -79,6 +90,9 @@ public class Clipboard extends FeatureExtension {
         JSONObject result = new JSONObject();
         result.put(PARAM_KEY_TEXT, text);
         request.getCallback().callback(new Response(result));
+    }
+
+    protected void recordClipboardFeature(Request request) {
     }
 
     @Override

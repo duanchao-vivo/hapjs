@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the hapjs-platform Project Contributors
+ * Copyright (c) 2021-present, the hapjs-platform Project Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -19,6 +19,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.text.TextUtils;
 import android.util.ArrayMap;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.KeyEvent;
@@ -53,6 +54,7 @@ import org.hapjs.common.executors.Executors;
 import org.hapjs.common.utils.ColorUtil;
 import org.hapjs.common.utils.DisplayUtil;
 import org.hapjs.common.utils.FloatUtil;
+import org.hapjs.common.utils.FoldingUtils;
 import org.hapjs.common.utils.IntegerUtil;
 import org.hapjs.common.utils.SnapshotUtils;
 import org.hapjs.common.utils.UriUtils;
@@ -95,7 +97,9 @@ import org.hapjs.render.css.Node;
 import org.hapjs.render.css.value.CSSValues;
 import org.hapjs.render.vdom.DocComponent;
 import org.hapjs.runtime.HapEngine;
+import org.hapjs.runtime.ProviderManager;
 import org.hapjs.runtime.RuntimeActivity;
+import org.hapjs.system.SysOpProvider;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -126,6 +130,7 @@ public abstract class Component<T extends View>
     private static final String CALLBACK_KEY_FAIL = "fail";
     private static final String CALLBACK_KEY_COMPLETE = "complete";
     private static final int MIN_DISPLAY_SHOW_PLATFORM_VERSION = 1080;
+    private static SysOpProvider sSysOpProvider = ProviderManager.getDefault().getProvider(SysOpProvider.NAME);
     protected Context mContext;
     protected Container mParent;
     protected int mRef;
@@ -146,6 +151,7 @@ public abstract class Component<T extends View>
     protected ComponentBackgroundComposer mBackgroundComposer;
     protected int mMinPlatformVersion;
     protected Canvas mSnapshotCanvas;
+    protected int mAdaptiveBeforeWidth;
     protected boolean mShow = true;
     protected boolean mShowAttrInitialized = false;
     private boolean mIsFixPositionDisabled = false;
@@ -161,6 +167,7 @@ public abstract class Component<T extends View>
     private AnimatorListenerBridge.AnimatorEventListener mAnimatorEventListener;
     private Map<String, String> mStylesApplyed;
     private Map<String, Object> mSavedState;
+    private List<String> mHookData;
     private Transform mTransform;
     private CSSAnimatorSet mAnimatorSet;
     private CSSTransitionSet mTransitionSet;
@@ -185,13 +192,13 @@ public abstract class Component<T extends View>
     private ComponentPreDrawListener mUnReadyPreDrawListener;
     private boolean mRegisterClickEvent;
 
-    public Component(
-            HapEngine hapEngine,
-            Context context,
-            Container parent,
-            int ref,
-            RenderEventCallback callback,
-            Map<String, Object> savedState) {
+    protected boolean mIsAdMaterial = false;
+    protected boolean mIsUseInList = false;
+
+    private View mFullScreenView;
+
+    public Component(HapEngine hapEngine, Context context, Container parent, int ref, RenderEventCallback callback,
+                     Map<String, Object> savedState) {
         mHapEngine = hapEngine;
         mContext = context;
         mParent = parent;
@@ -209,6 +216,7 @@ public abstract class Component<T extends View>
         mDomTreeChangeListeners = new ArrayList<>();
 
         mAnimations = new HashMap<>();
+        mHookData = new ArrayList<>();
 
         if (parent != null) {
             mLazyCreate = parent.mLazyCreate;
@@ -219,6 +227,12 @@ public abstract class Component<T extends View>
             if (appInfo != null) {
                 mMinPlatformVersion = appInfo.getMinPlatformVersion();
             }
+        }
+        if (mParent != null && mParent.isAdMaterial()) {
+            mIsAdMaterial = true;
+        }
+        if (mParent != null && mParent.isUseInList()) {
+            mIsUseInList = true;
         }
     }
 
@@ -286,6 +300,7 @@ public abstract class Component<T extends View>
         invalidBackground();
         configBubbleEventAbove1040(true);
         initYogaNodeFromHost();
+        setFullScreenView(mHost);
     }
 
     public int getMinPlatformVersion() {
@@ -538,7 +553,8 @@ public abstract class Component<T extends View>
 
         if (mTransform != null
                 && (!Float.isNaN(mTransform.getTranslationXPercent())
-                || !Float.isNaN(mTransform.getTranslationYPercent()))) {
+                || !Float.isNaN(mTransform.getTranslationYPercent())
+                || !Float.isNaN(mTransform.getTranslationZPercent()))) {
             addGlobalLayoutListener();
         } else if (mTransformLayoutListener != null) {
             removeGlobalLayoutListener();
@@ -764,7 +780,7 @@ public abstract class Component<T extends View>
         }
     }
 
-    private String getState(String key) {
+    public String getState(String key) {
         CSSValues attributeMap = mStyleDomData.get(key);
         String applyState = State.NORMAL;
         if (attributeMap != null) {
@@ -1389,9 +1405,9 @@ public abstract class Component<T extends View>
             return true;
         }
 
-        if (Attributes.Event.FOCUS.equals(event)
-                || Attributes.Event.BLUR.equals(event)
-                || Attributes.Event.CLICK.equals(event)) {
+        if (Attributes.Event.FOCUS.equals(event) ||
+                Attributes.Event.BLUR.equals(event) ||
+                Attributes.Event.CLICK.equals(event)) {
             mHost.setFocusable(true);
         }
 
@@ -1490,6 +1506,17 @@ public abstract class Component<T extends View>
         }
 
         return result;
+    }
+
+    public void applyHook(List<String> hooks){
+        if (hooks == null || hooks.isEmpty()) {
+            return;
+        }
+        mHookData.addAll(hooks);
+    }
+
+    public List<String> getHook(){
+        return mHookData;
     }
 
     private boolean isListenFullscreenChange() {
@@ -1645,6 +1672,10 @@ public abstract class Component<T extends View>
             }
         }
         clearPreDrawListener();
+        if(mHookData != null){
+            mHookData.clear();
+        }
+
         if (mAnimatorEventListener != null) {
             mAnimatorEventListener.unregisterAllEvents();
             mAnimatorEventListener = null;
@@ -1688,6 +1719,14 @@ public abstract class Component<T extends View>
             mResizeListener.setLayout(layout);
         }
         savedState.clear();
+    }
+
+    public boolean isComponentAdaptiveEnable() {
+        if (mContext == null || sSysOpProvider == null) {
+            return false;
+        }
+        return sSysOpProvider.isFoldableDevice(mContext)
+                && !sSysOpProvider.isFoldStatusByDisplay(mContext) && FoldingUtils.isAdaptiveScreenMode();
     }
 
     public int getWidth() {
@@ -1741,12 +1780,31 @@ public abstract class Component<T extends View>
             mPercentWidth = -1;
             int width =
                     Attributes.getInt(mHapEngine, widthStr, ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (isComponentAdaptiveEnable()) {
+                mAdaptiveBeforeWidth = width;
+                width = getAdapterWidth(width);
+            }
             lp.width = width;
             if (mNode != null) {
                 mNode.setWidth(width);
             }
         }
         mWidthDefined = true;
+    }
+
+    private int getAdapterWidth(int width) {
+        int foldWidth = sSysOpProvider.getFoldDisplayWidth(mContext.getApplicationContext());
+        DisplayMetrics displayMetrics = mContext.getResources().getDisplayMetrics();
+        if (width > (foldWidth / 2)) {
+            int adapterMargin = foldWidth - width;
+            boolean isLandscapeMode = DisplayUtil.isLandscapeMode(mContext);
+            if (isLandscapeMode) {
+                return displayMetrics.widthPixels + sSysOpProvider.getSafeAreaWidth(mContext) - adapterMargin;
+            } else {
+                return displayMetrics.widthPixels - adapterMargin;
+            }
+        }
+        return width;
     }
 
     public int getHeight() {
@@ -2255,7 +2313,11 @@ public abstract class Component<T extends View>
     }
 
     public void setBackgroundImage(String backgroundImage) {
-        getOrCreateBackgroundComposer().setBackgroundImage(backgroundImage);
+        setBackgroundImage(backgroundImage, false);
+    }
+
+    public void setBackgroundImage(String backgroundImage, boolean setBlur) {
+        getOrCreateBackgroundComposer().setBackgroundImage(backgroundImage, setBlur);
     }
 
     public void setBackgroundSize(String backgroundSize) {
@@ -2925,6 +2987,13 @@ public abstract class Component<T extends View>
         mRef = ref;
     }
 
+    /**
+     * list 中 绑定数据后，回调该方法
+     */
+    protected void afterApplyDataToComponent() {
+
+    }
+
     public RenderEventCallback getCallback() {
         return mCallback;
     }
@@ -3229,22 +3298,13 @@ public abstract class Component<T extends View>
         if (TextUtils.isEmpty(keyframes)) {
             return null;
         }
-
         Animation animation = mAnimations.get(animId);
-        CSSAnimatorSet animatorSet;
-        if (animation != null) {
-            Log.i(TAG, "Animation ID " + animId + ", duplicate for reuse.");
-            animatorSet =
-                    AnimationParser.parse(mHapEngine, animation.getAnimatorSet(), keyframes, this);
-            if (animatorSet != null) {
-                animatorSet.setAnimation(animation);
-                animation.setAnimatorSet(animatorSet);
-            }
+        CSSAnimatorSet tempAnimatorSet, animatorSet;
+
+        if (animation != null && animation.getAnimatorSet() != null) {
+            tempAnimatorSet = animation.getAnimatorSet();
         } else {
-            animatorSet = AnimationParser.parse(mHapEngine, null, keyframes, this);
-            if (animatorSet != null) {
-                animation = new Animation(animatorSet);
-            }
+            tempAnimatorSet = new CSSAnimatorSet(mHapEngine, this);
         }
 
         try {
@@ -3254,28 +3314,40 @@ public abstract class Component<T extends View>
                 Object attribute = optionsObj.get(key);
                 if ("duration".equals(key)) {
                     int duration = AnimationParser.getTime(Attributes.getString(attribute));
-                    animation.getAnimatorSet().setDuration(duration);
+                    tempAnimatorSet.setDuration(duration);
                 } else if ("easing".equals(key)) {
                     String timing = Attributes.getString(attribute, "linear");
-                    animation.getAnimatorSet().setInterpolator(TimingFactory.getTiming(timing));
+                    tempAnimatorSet.setKeyFrameInterpolator(TimingFactory.getTiming(timing));
                 } else if ("delay".equals(key)) {
                     int delay = AnimationParser.getTime(Attributes.getString(attribute));
-                    animation.getAnimatorSet().setDelay(delay);
+                    tempAnimatorSet.setDelay(delay);
                 } else if ("iterations".equals(key)) {
                     int repeatCount = Attributes.getInt(mHapEngine, attribute, 0);
-                    animation.getAnimatorSet().setRepeatCount(repeatCount);
+                    tempAnimatorSet.setRepeatCount(repeatCount);
                 } else if ("fill".equals(key)) {
                     String fillMode = Attributes.getString(attribute, CSSAnimatorSet.FillMode.NONE);
-                    animation.getAnimatorSet().setFillMode(fillMode);
+                    tempAnimatorSet.setFillMode(fillMode);
                 } else if ("direction".equals(key)) {
                     String direction =
                             Attributes.getString(attribute, CSSAnimatorSet.Direction.NORMAL);
-                    animation.getAnimatorSet().setDirection(direction);
+                    tempAnimatorSet.setDirection(direction);
                 }
             }
         } catch (JSONException e) {
             e.printStackTrace();
         }
+
+        animatorSet = AnimationParser.parse(mHapEngine, tempAnimatorSet, keyframes, this);
+        if (animatorSet != null) {
+            if (animation != null) {
+                Log.i(TAG, "Animation ID " + animId + ", duplicate for reuse.");
+                animatorSet.setAnimation(animation);
+                animation.setAnimatorSet(animatorSet);
+            } else {
+                animation = new Animation(animatorSet);
+            }
+        }
+
         mAnimations.put(animId, animation);
         return animation;
     }
@@ -3406,7 +3478,7 @@ public abstract class Component<T extends View>
         callback(args, CALLBACK_KEY_COMPLETE, null);
     }
 
-    public void callback(java.util.Map<String, Object> args, String key, Object object) {
+    public void callback(Map<String, Object> args, String key, Object object) {
         if (args != null && args.containsKey(key)) {
             String callbackId = (String) args.get(key);
             mCallback.onJsMethodCallback(getPageId(), callbackId, object);
@@ -3609,7 +3681,20 @@ public abstract class Component<T extends View>
                 component.mTransform.setTranslationY(translationY);
                 component.mHost.setTranslationY(translationY);
             }
+            if (!Float.isNaN(component.mTransform.getTranslationZPercent())) {
+                float translationZ = component.mTransform.getTranslationZPercent() * 2; // 2dp thickness
+                component.mTransform.setTranslationZ(translationZ);
+                component.mHost.setTranslationZ(translationZ);
+            }
         }
+    }
+
+    public boolean isAdMaterial() {
+        return mIsAdMaterial;
+    }
+
+    public boolean isUseInList() {
+        return mIsUseInList;
     }
 
     public static class RecyclerItem extends RecyclerDataItem {
@@ -3679,6 +3764,7 @@ public abstract class Component<T extends View>
             }
             recycle.performRestoreInstanceState(mInstanceState);
             mInstanceState.clear();
+            recycle.afterApplyDataToComponent();
         }
 
         public boolean isFixOrFloating() {
@@ -4148,5 +4234,20 @@ public abstract class Component<T extends View>
         public void unregisterAllEvents() {
             registeredEventsSet.clear();
         }
+    }
+
+    public View getFullScreenView() {
+        if (mFullScreenView == null) {
+            return mHost;
+        }
+        return mFullScreenView;
+    }
+
+    public void setFullScreenView(View view) {
+        mFullScreenView = view;
+    }
+
+    public boolean preConsumeEvent(String eventName, Map<String, Object> data, boolean immediately) {
+        return false;
     }
 }

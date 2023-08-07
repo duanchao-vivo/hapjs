@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the hapjs-platform Project Contributors
+ * Copyright (c) 2021-2022, the hapjs-platform Project Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -8,6 +8,9 @@ package org.hapjs.common.utils;
 import android.net.Uri;
 import org.hapjs.bridge.HybridRequest;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 public class UriUtils {
     public static final String SCHEMA_CONTENT = "content";
     public static final String SCHEMA_FILE = "file";
@@ -15,10 +18,14 @@ public class UriUtils {
     private static final String ANDROID_ASSET_PREFIX = "file:///android_asset/";
     private static final String SCHEMA_HTTP = "http";
     private static final String SCHEMA_HTTPS = "https";
-    private static final String[] DEEP_LINK_PREFIXES =
-            new String[] {
-                    "http://hapjs.org/app/", "https://hapjs.org/app/", "hap://app/",
-            };
+
+    private static final String[] DEEP_LINK_PREFIXES = new String[] {
+            "http://qr.quickapp.cn/app/",
+            "https://qr.quickapp.cn/app/",
+            "http://hapjs.org/app/",
+            "https://hapjs.org/app/",
+            "hap://app/"
+    };
 
     public static boolean isAssetUri(String uri) {
         return uri != null && uri.startsWith(ANDROID_ASSET_PREFIX);
@@ -95,5 +102,18 @@ public class UriUtils {
             return false;
         }
         return u1.equals(u2);
+    }
+
+    public static String getPkgFromHybridUri(Uri uri) {
+        String appId;
+        String regex = "(hap|http|https)://(hapjs\\.org/)?app/([^/?#]+)/?(.*)";
+        Pattern pattern = Pattern.compile(regex);
+        Matcher matcher = pattern.matcher(uri.toString());
+        if (matcher.find()) {
+            appId = matcher.group(3);
+        } else {
+            return null;
+        }
+        return appId;
     }
 }

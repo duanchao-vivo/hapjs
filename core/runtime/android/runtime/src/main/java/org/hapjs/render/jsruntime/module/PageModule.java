@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the hapjs-platform Project Contributors
+ * Copyright (c) 2021-present, the hapjs-platform Project Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -9,12 +9,15 @@ import android.graphics.Rect;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
+
 import org.hapjs.bridge.Extension;
 import org.hapjs.bridge.NativeInterface;
 import org.hapjs.bridge.Request;
 import org.hapjs.bridge.Response;
 import org.hapjs.bridge.annotation.ActionAnnotation;
 import org.hapjs.bridge.annotation.ModuleExtensionAnnotation;
+import org.hapjs.common.utils.DisplayUtil;
+import org.hapjs.common.utils.ThreadUtils;
 import org.hapjs.model.AppInfo;
 import org.hapjs.render.DecorLayout;
 import org.hapjs.render.Display;
@@ -22,6 +25,7 @@ import org.hapjs.render.PageManager;
 import org.hapjs.render.RootView;
 import org.hapjs.render.vdom.DocComponent;
 import org.hapjs.render.vdom.VDocument;
+import org.hapjs.runtime.HapEngine;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -30,20 +34,31 @@ import org.json.JSONObject;
         actions = {
                 @ActionAnnotation(name = PageModule.ACTION_FINISH_PAGE, mode = Extension.Mode.SYNC),
                 @ActionAnnotation(name = PageModule.ACTION_GET_MENUBAR_RECT, mode = Extension.Mode.SYNC),
-                @ActionAnnotation(name = PageModule.ACTION_SET_MENUBAR_DATA, mode = Extension.Mode.SYNC)
-        })
+                @ActionAnnotation(name = PageModule.ACTION_SET_MENUBAR_DATA, mode = Extension.Mode.SYNC),
+                @ActionAnnotation(name = PageModule.ACTION_GET_MENUBAR_BOUNDING_RECT, mode = Extension.Mode.SYNC),
+                @ActionAnnotation(name = PageModule.ACTION_SET_MENUBAR_TIPS, mode = Extension.Mode.SYNC),
+                @ActionAnnotation(name = PageModule.ACTION_SET_TABBAR_ITEM, mode = Extension.Mode.SYNC)
+        }
+)
 public class PageModule extends ModuleExtension {
 
     protected static final String NAME = "system.page";
     protected static final String ACTION_FINISH_PAGE = "finishPage";
     protected static final String ACTION_GET_MENUBAR_RECT = "getMenuBarRect";
+    protected static final String ACTION_GET_MENUBAR_BOUNDING_RECT = "getMenuBarBoundingRect";
     protected static final String RESULT_MENU_BAR_WIDTH = "menuBarWidth";
     protected static final String RESULT_MENU_BAR_HEIGHT = "menuBarHeight";
     protected static final String RESULT_MENU_BAR_LEFT = "menuBarLeft";
     protected static final String RESULT_MENU_BAR_TOP = "menuBarTop";
     protected static final String RESULT_MENU_BAR_RIGHT = "menuBarRight";
     protected static final String RESULT_MENU_BAR_BOTTOM = "menuBarBottom";
+    protected static final String RESULT_MENU_BAR_PAGE_LEFT = "menuBarPageLeft";
+    protected static final String RESULT_MENU_BAR_PAGE_RIGHT = "menuBarPageRight";
+    protected static final String RESULT_MENU_BAR_PAGE_TOP = "menuBarPageTop";
+    protected static final String RESULT_MENU_BAR_PAGE_BOTTOM = "menuBarPageBottom";
     protected static final String ACTION_SET_MENUBAR_DATA = "setMenubarData";
+    protected static final String ACTION_SET_MENUBAR_TIPS = "setMenubarTips";
+    protected static final String ACTION_SET_TABBAR_ITEM = "setTabBarItem";
     private static final String TAG = "PageModule";
     private PageManager mPageManager;
 
@@ -65,8 +80,14 @@ public class PageModule extends ModuleExtension {
             return finishPage(params);
         } else if (ACTION_GET_MENUBAR_RECT.equals(action)) {
             return getMenuBarRect(request);
+        } else if (ACTION_GET_MENUBAR_BOUNDING_RECT.equals(action)) {
+            return getMenuBarBoundingRect(request);
         } else if (ACTION_SET_MENUBAR_DATA.equals(action)) {
             return setMenuBarData(request);
+        } else if (ACTION_SET_MENUBAR_TIPS.equals(action)) {
+            return setMenuBarTips(request);
+        } else if (ACTION_SET_TABBAR_ITEM.equals(action)) {
+            return setTabBarItem(request);
         }
         return Response.NO_ACTION;
     }
@@ -88,12 +109,78 @@ public class PageModule extends ModuleExtension {
         if (null != menubarView) {
             menubarView.getGlobalVisibleRect(rect);
         }
-        result.put(RESULT_MENU_BAR_WIDTH, null != menubarView ? menubarView.getWidth() : -1);
-        result.put(RESULT_MENU_BAR_HEIGHT, null != menubarView ? menubarView.getHeight() : -1);
-        result.put(RESULT_MENU_BAR_LEFT, rect.left);
-        result.put(RESULT_MENU_BAR_TOP, rect.top);
-        result.put(RESULT_MENU_BAR_RIGHT, rect.right);
-        result.put(RESULT_MENU_BAR_BOTTOM, rect.bottom);
+        int designWidth = -1;
+        HapEngine hapEngine = null;
+        if (null != request) {
+            hapEngine = request.getHapEngine();
+        }
+        if (null != hapEngine) {
+            designWidth = hapEngine.getDesignWidth();
+        }
+        if (null != menubarView && designWidth > 0) {
+            result.put(RESULT_MENU_BAR_WIDTH, DisplayUtil.getDesignPxByWidth(menubarView.getWidth(), designWidth));
+            result.put(RESULT_MENU_BAR_HEIGHT, DisplayUtil.getDesignPxByWidth(menubarView.getHeight(), designWidth));
+            result.put(RESULT_MENU_BAR_LEFT, DisplayUtil.getDesignPxByWidth(rect.left, designWidth));
+            result.put(RESULT_MENU_BAR_TOP, DisplayUtil.getDesignPxByWidth(rect.top, designWidth));
+            result.put(RESULT_MENU_BAR_RIGHT, DisplayUtil.getDesignPxByWidth(rect.right, designWidth));
+            result.put(RESULT_MENU_BAR_BOTTOM, DisplayUtil.getDesignPxByWidth(rect.bottom, designWidth));
+        } else {
+            result.put(RESULT_MENU_BAR_WIDTH, null != menubarView ? menubarView.getWidth() : -1);
+            result.put(RESULT_MENU_BAR_HEIGHT, null != menubarView ? menubarView.getHeight() : -1);
+            result.put(RESULT_MENU_BAR_LEFT, rect.left);
+            result.put(RESULT_MENU_BAR_TOP, rect.top);
+            result.put(RESULT_MENU_BAR_RIGHT, rect.right);
+            result.put(RESULT_MENU_BAR_BOTTOM, rect.bottom);
+        }
+        return new Response(result);
+    }
+
+    private Response getMenuBarBoundingRect(Request request) throws JSONException {
+        JSONObject result = new JSONObject();
+        Display display = getDisPlay(request);
+        View menubarView = null;
+        Rect contentInsets = null;
+        if (null != display) {
+            menubarView = display.getMenuBar();
+            contentInsets = display.getContentInsets();
+        }
+        Rect rect = new Rect();
+        int[] positionWindow = null;
+        if (null != menubarView) {
+            menubarView.getGlobalVisibleRect(rect);
+            positionWindow = new int[2];
+            menubarView.getLocationInWindow(positionWindow);
+        }
+        int designWidth = -1;
+        HapEngine hapEngine = null;
+        if (null != request) {
+            hapEngine = request.getHapEngine();
+        }
+        if (null != hapEngine) {
+            designWidth = hapEngine.getDesignWidth();
+        }
+        if (null != menubarView && designWidth > 0) {
+            result.put(RESULT_MENU_BAR_WIDTH, DisplayUtil.getDesignPxByWidth(menubarView.getWidth(), designWidth));
+            result.put(RESULT_MENU_BAR_HEIGHT, DisplayUtil.getDesignPxByWidth(menubarView.getHeight(), designWidth));
+            result.put(RESULT_MENU_BAR_LEFT, DisplayUtil.getDesignPxByWidth(rect.left, designWidth));
+            result.put(RESULT_MENU_BAR_TOP, DisplayUtil.getDesignPxByWidth(rect.top, designWidth));
+            result.put(RESULT_MENU_BAR_RIGHT, DisplayUtil.getDesignPxByWidth(rect.right, designWidth));
+            result.put(RESULT_MENU_BAR_BOTTOM, DisplayUtil.getDesignPxByWidth(rect.bottom, designWidth));
+            if (null != positionWindow && positionWindow.length == 2) {
+                result.put(RESULT_MENU_BAR_PAGE_LEFT, DisplayUtil.getDesignPxByWidth(positionWindow[0], designWidth));
+                result.put(RESULT_MENU_BAR_PAGE_TOP, DisplayUtil.getDesignPxByWidth(positionWindow[1] - (null != contentInsets ? contentInsets.top : 0), designWidth));
+                result.put(RESULT_MENU_BAR_PAGE_RIGHT, DisplayUtil.getDesignPxByWidth(positionWindow[0] + menubarView.getWidth(), designWidth));
+                result.put(RESULT_MENU_BAR_PAGE_BOTTOM, DisplayUtil.getDesignPxByWidth(positionWindow[1] + menubarView.getHeight() - (null != contentInsets ? contentInsets.top : 0), designWidth));
+            }
+        } else {
+            result.put(RESULT_MENU_BAR_WIDTH, -1);
+            result.put(RESULT_MENU_BAR_HEIGHT, -1);
+            result.put(RESULT_MENU_BAR_LEFT, rect.left);
+            result.put(RESULT_MENU_BAR_TOP, rect.top);
+            result.put(RESULT_MENU_BAR_RIGHT, rect.right);
+            result.put(RESULT_MENU_BAR_BOTTOM, rect.bottom);
+            Log.w(TAG, "getMenuBarBoundingRect menubarView or designWidth is not valid.");
+        }
         return new Response(result);
     }
 
@@ -116,6 +203,37 @@ public class PageModule extends ModuleExtension {
         if (null != display) {
             display.refreshMenubarShareData(params);
             return Response.SUCCESS;
+        }
+        return Response.ERROR;
+    }
+
+    private Response setTabBarItem(Request request) {
+        if (null == request) {
+            Log.e(TAG, "setTabBarItem request is null.");
+            return Response.ERROR;
+        }
+        JSONObject params = null;
+        try {
+            JSONObject jsonParams = request.getJSONParams();
+            if (null != jsonParams && jsonParams.has("attr")) {
+                params = jsonParams.getJSONObject("attr");
+            }
+        } catch (JSONException e) {
+            Log.e(TAG, " setTabBarItem jsonParams is null.");
+            return Response.ERROR;
+        }
+        NativeInterface nativeInterface = null;
+        if (null != request) {
+            nativeInterface = request.getNativeInterface();
+        }
+        if (null != nativeInterface) {
+            RootView rootView = nativeInterface.getRootView();
+            if (null != rootView) {
+                rootView.updateTabBarData(params);
+                return Response.SUCCESS;
+            } else {
+                return Response.ERROR;
+            }
         }
         return Response.ERROR;
     }
@@ -149,5 +267,37 @@ public class PageModule extends ModuleExtension {
             display = decorLayout.getDecorLayoutDisPlay();
         }
         return display;
+    }
+
+    public Response setMenuBarTips(Request request) {
+        if (null == request) {
+            Log.e(TAG, "setMenuBarTips request is null.");
+            return Response.ERROR;
+        }
+        JSONObject params = null;
+        try {
+            JSONObject jsonParams = request.getJSONParams();
+            if (null != jsonParams && jsonParams.has("attr")) {
+                params = jsonParams.getJSONObject("attr");
+            }
+        } catch (JSONException e) {
+            Log.e(TAG, " invokeInner setMenuBarTips jsonParams is null.");
+        }
+        final JSONObject realParams = params;
+        Display display = getDisPlay(request);
+        if (null != display) {
+            ThreadUtils.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    boolean isSuccess = display.showMenubarTips(realParams);
+                    if (!isSuccess) {
+                        Log.e(TAG, " invokeInner ERROR setMenuBarTips.");
+                    }
+                }
+            });
+            return Response.SUCCESS;
+        } else {
+            return Response.ERROR;
+        }
     }
 }

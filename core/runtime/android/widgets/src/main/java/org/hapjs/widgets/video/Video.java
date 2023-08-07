@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the hapjs-platform Project Contributors
+ * Copyright (c) 2021-present, the hapjs-platform Project Contributors
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -7,9 +7,12 @@ package org.hapjs.widgets.video;
 
 import android.content.Context;
 import android.content.pm.ActivityInfo;
+import android.graphics.Bitmap;
 import android.graphics.Outline;
+import android.net.Uri;
 import android.os.Build;
 import android.text.TextUtils;
+import android.util.ArrayMap;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
@@ -17,10 +20,21 @@ import android.view.ViewOutlineProvider;
 import com.facebook.yoga.YogaAlign;
 import com.facebook.yoga.YogaFlexDirection;
 import com.facebook.yoga.YogaNode;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
+
+import org.hapjs.bridge.ApplicationContext;
+import org.hapjs.bridge.Response;
 import org.hapjs.bridge.annotation.WidgetAnnotation;
 import org.hapjs.common.compat.BuildPlatform;
+import org.hapjs.common.executors.Executors;
 import org.hapjs.common.net.NetworkReportManager;
 import org.hapjs.common.utils.FloatUtil;
 import org.hapjs.component.Component;
@@ -30,7 +44,11 @@ import org.hapjs.component.bridge.RenderEventCallback;
 import org.hapjs.component.constants.Attributes;
 import org.hapjs.component.constants.Corner;
 import org.hapjs.component.view.drawable.CSSBackgroundDrawable;
+import org.hapjs.model.videodata.VideoCacheData;
+import org.hapjs.model.videodata.VideoCacheManager;
 import org.hapjs.render.Page;
+import org.hapjs.render.RootView;
+import org.hapjs.render.vdom.DocComponent;
 import org.hapjs.runtime.HapEngine;
 import org.hapjs.widgets.view.video.FlexVideoView;
 
@@ -41,6 +59,7 @@ import org.hapjs.widgets.view.video.FlexVideoView;
                 Video.METHOD_PAUSE,
                 Video.METHOD_SET_CURRENT_TIME,
                 Video.METHOD_EXIT_FULLSCREEN,
+                Video.METHOD_SNAP_SHOT,
                 Component.METHOD_REQUEST_FULLSCREEN,
                 Component.METHOD_GET_BOUNDING_CLIENT_RECT,
                 Component.METHOD_FOCUS
@@ -53,6 +72,7 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
     protected static final String METHOD_PAUSE = "pause";
     protected static final String METHOD_SET_CURRENT_TIME = "setCurrentTime";
     protected static final String METHOD_EXIT_FULLSCREEN = "exitFullscreen";
+    protected static final String METHOD_SNAP_SHOT = "snapshot";
     private static final String TAG = "Video";
     // event
     private static final String ERROR = "error";
@@ -73,16 +93,43 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
     private static final String TITLE_BAR = "titlebar";
     private static final String TITLE = "title";
     private static final String PLAY_COUNT = "playcount";
+    private static final String SPEED = "speed";
 
     private static final String CURRENT_TIME = "currenttime";
 
+    //pause reason
+    private static final String PAUSE_CODE = "pauseCode";
+    // 按下视频左下角暂停按钮，导致视频暂停
+    private static final int VIDEO_PAUSE_OF_PRESS_PAUSE_BUTTON = 201;
+    // 调用快应用官方文档中的视频暂停方法，导致视频暂停
+    private static final int VIDEO_PAUSE_OF_CALL_PAUSE_METHOD = 202;
+    // 其他情况导致视频暂停
+    private static final int VIDEO_PAUSE_OF_OTHER_REASON = 203;
+
     private String mUri;
+    private String mParseUriStr;
     private boolean mAutoPlay;
     private boolean mControlsVisible = true;
     private boolean mOnPreparedRegistered;
     private boolean mPreInPlayingState;
     private boolean mPaused;
     private long mLastPosition = -1;
+    public boolean mIsDestroy = false;
+
+    private static final String CALLBACK_KEY_SUCCESS = "success";
+    private static final String CALLBACK_KEY_FAIL = "fail";
+
+    private static final String RESULT_URI = "uri";
+    private static final String RESULT_NAME = "name";
+    private static final String RESULT_SIZE = "size";
+
+    private static final int IMAGE_QUALITY = 100;
+    public static final float SPEED_DEFAULT = 1.0f;
+    private long mMinLastModified;
+    private static final long MAX_ALIVE_TIME_MILLIS = 60 * 60 * 1000L;
+
+    private boolean mCallFromPauseMethod;
+    private FlexVideoView mVideoView;
 
     public Video(
             HapEngine hapEngine,
@@ -98,38 +145,48 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
     @Override
     protected FlexVideoView createViewImpl() {
         boolean visible = Attributes.getBoolean(mAttrsDomData.get(CONTROLS), true);
-        final FlexVideoView videoView = new FlexVideoView(mContext, visible);
-        videoView.setComponent(this);
-        videoView.setIsLazyCreate(mLazyCreate);
-        videoView.setOnPreparedListener(
-                new FlexVideoView.OnPreparedListener() {
-                    @Override
-                    public void onPrepared(IMediaPlayer mp) {
-                        if (mHost == null || !mHost.isAttachedToWindow()) {
-                            return;
-                        }
-                        if (mOnPreparedRegistered) {
-                            Map<String, Object> params = new HashMap();
-                            params.put("duration", mp.getDuration() / 1000f);
-                            mCallback.onJsEventCallback(getPageId(), mRef, PREPARED, Video.this,
-                                    params, null);
-                        }
-                        setVideoSize(mp.getVideoWidth(), mp.getVideoHeight());
-                        long lastPosition = getLastPosition();
-                        if (lastPosition > 0) {
-                            mp.seek(lastPosition);
-                            setLastPosition(-1);
-                            videoView.start();
-                        } else if (mAutoPlay) {
-                            videoView.start();
-                        }
+        mVideoView = new FlexVideoView(mContext, visible);
+        mVideoView.setComponent(this);
+        mVideoView.setIsLazyCreate(mLazyCreate);
+        mVideoView.setOnPreparedListener(new FlexVideoView.OnPreparedListener() {
+            @Override
+            public void onPrepared(IMediaPlayer mp) {
+                if (mHost == null || !mHost.isAttachedToWindow()) {
+                    Log.w(TAG, "createViewImpl onPrepared mHost null or !mHost.isAttachedToWindow.");
+                    return;
+                }
+                if (mOnPreparedRegistered) {
+                    Map<String, Object> params = new HashMap();
+                    params.put("duration", mp.getDuration() / 1000f);
+                    mCallback.onJsEventCallback(getPageId(), mRef, PREPARED, Video.this, params,
+                            null);
+                }
+                setVideoSize(mp.getVideoWidth(), mp.getVideoHeight());
+                long lastPosition = getLastPosition();
+                if (lastPosition < 0) {
+                    VideoCacheData videoCacheData = VideoCacheManager.getInstance().getVideoData(getPageId(), mParseUriStr);
+                    if (null != videoCacheData) {
+                        lastPosition = videoCacheData.lastPosition;
                     }
-                });
+                }
+                if (lastPosition > 0) {
+                    mp.seek(lastPosition);
+                    setLastPosition(-1);
+                    mVideoView.start();
+                } else if (mAutoPlay) {
+                    mVideoView.start();
+                } else {
+                    Log.w(TAG, "createViewImpl onPrepared else  lastPosition : " + lastPosition);
+                }
+                Log.w(TAG, "createViewImpl onPrepared lastPosition  : " + lastPosition
+                        + " mAutoPlay : " + mAutoPlay);
+            }
+        });
 
         getOrCreateBackgroundComposer().setBackgroundColor(0xee000000);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            videoView.setOutlineProvider(
+            mVideoView.setOutlineProvider(
                     new ViewOutlineProvider() {
                         @Override
                         public void getOutline(View view, Outline outline) {
@@ -147,9 +204,9 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
                             }
                         }
                     });
-            videoView.setClipToOutline(true);
+            mVideoView.setClipToOutline(true);
         }
-        return videoView;
+        return mVideoView;
     }
 
     @Override
@@ -195,6 +252,37 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
             case PLAY_COUNT:
                 String playCount = Attributes.getString(attribute, Attributes.PlayCount.ONCE);
                 setPlayCount(playCount);
+                return true;
+            case Attributes.Style.SHOW:
+                mShow = parseShowAttribute(attribute);
+                if (!mShow && mHost.mIsFullScreen) {
+                    boolean isSameUriStr = false;
+                    if (null != mHost && mHost.mIsFullScreen) {
+                        Uri cacheUri = mHost.mCacheFullScreenUri;
+                        String cacheUriStr = "";
+                        if (null != cacheUri) {
+                            cacheUriStr = cacheUri.toString();
+                        }
+                        if (!TextUtils.isEmpty(cacheUriStr)) {
+                            isSameUriStr = cacheUriStr.equals(mUri);
+                        }
+                    }
+                    if (isSameUriStr) {
+                        exitFullscreen();
+                    }
+                }
+                super.setAttribute(key, attribute);
+                return true;
+            case SPEED:
+                String speedStr = Attributes.getString(attribute, "1");
+                float speed = SPEED_DEFAULT;
+                try {
+                    speed = Float.parseFloat(speedStr);
+                } catch (NumberFormatException e) {
+                    Log.d(TAG, "parse speed error:" + e);
+                    speed = SPEED_DEFAULT;
+                }
+                setSpeed(speed);
                 return true;
             default:
                 break;
@@ -252,7 +340,16 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
                     new FlexVideoView.OnPauseListener() {
                         @Override
                         public void onPause() {
-                            mCallback.onJsEventCallback(getPageId(), mRef, PAUSE, Video.this, null,
+                            Map<String, Object> params = new HashMap<>(1);
+                            if (mVideoView != null && mVideoView.isPauseButtonPress()) {
+                                params.put(PAUSE_CODE, VIDEO_PAUSE_OF_PRESS_PAUSE_BUTTON);
+                            } else if (mCallFromPauseMethod) {
+                                params.put(PAUSE_CODE, VIDEO_PAUSE_OF_CALL_PAUSE_METHOD);
+                            } else {
+                                params.put(PAUSE_CODE, VIDEO_PAUSE_OF_OTHER_REASON);
+                            }
+                            Log.i(TAG, "pauseCode: " + params.get(PAUSE_CODE));
+                            mCallback.onJsEventCallback(getPageId(), mRef, PAUSE, Video.this, params,
                                     null);
                         }
                     });
@@ -369,9 +466,14 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
             mHost.setVideoURI(null);
             return;
         }
-        mHost.setVideoURI(tryParseUri(uri));
-        NetworkReportManager.getInstance()
-                .reportNetwork(NetworkReportManager.KEY_VIDEO, uri.toString());
+        Uri tmpUri = tryParseUri(uri);
+        if (null != tmpUri) {
+            mParseUriStr = tmpUri.toString();
+        } else {
+            mParseUriStr = null;
+        }
+        mHost.setVideoURI(tmpUri);
+        NetworkReportManager.getInstance().reportNetwork(NetworkReportManager.KEY_VIDEO, uri.toString());
     }
 
     public void setAutoPlay(boolean autoPlay) {
@@ -426,7 +528,9 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
         if (mHost == null) {
             return;
         }
+        mCallFromPauseMethod = true;
         mHost.pause();
+        mCallFromPauseMethod = false;
     }
 
     private void requestFullscreen(int screenOrientation) {
@@ -442,7 +546,92 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
         }
         mHost.exitFullscreen();
     }
+    private void snapshot(Map<String, Object> args) {
+        if (mHost == null || null == args) {
+            return;
+        }
 
+        DocComponent rootComponent = getRootComponent();
+        if (rootComponent == null) {
+            return;
+        }
+
+        RootView rootView = (RootView) rootComponent.getHostView();
+        if (rootView != null) {
+            HapEngine hapEngine = HapEngine.getInstance(rootView.getPackage());
+            ApplicationContext applicationContext = hapEngine.getApplicationContext();
+            File fileDir = new File(applicationContext.getCacheDir() + File.separator + "video_shot");
+            if (!fileDir.exists()) {
+                fileDir.mkdirs();
+            }
+            File tempFile = new File(fileDir, UUID.randomUUID() + ".jpeg");
+            Bitmap bitmap = null;
+            try (OutputStream out = new FileOutputStream(tempFile)) {
+                bitmap = mHost.getVideoView().getBitmap();
+                bitmap.compress(Bitmap.CompressFormat.JPEG, IMAGE_QUALITY, out);
+
+                String internalUri = applicationContext.getInternalUri(tempFile);
+                String name = getFileName(internalUri);
+                Map<String, Object> data = new ArrayMap<>(3);
+                data.put(RESULT_URI, internalUri);
+                data.put(RESULT_NAME, name);
+                data.put(RESULT_SIZE, tempFile.length());
+                mCallback.onJsMethodCallback(getPageId(), (String) args.get(CALLBACK_KEY_SUCCESS), data);
+            } catch (FileNotFoundException e) {
+                mCallback.onJsMethodCallback(getPageId(), (String) args.get(CALLBACK_KEY_FAIL), e.getMessage(), Response.CODE_FILE_NOT_FOUND);
+            } catch (IOException e) {
+                mCallback.onJsMethodCallback(getPageId(), (String) args.get(CALLBACK_KEY_FAIL), e.getMessage(), Response.CODE_IO_ERROR);
+            } catch (Exception e) {
+                mCallback.onJsMethodCallback(getPageId(), (String) args.get(CALLBACK_KEY_FAIL), e.getMessage(), Response.CODE_GENERIC_ERROR);
+            }
+            if (bitmap != null) {
+                bitmap.recycle();
+                bitmap = null;
+            }
+
+            synchronized (this) {
+                File[] files = fileDir.listFiles();
+                if (files != null && files.length > 1) {
+                    long currentTimeMillis = System.currentTimeMillis();
+                    if (currentTimeMillis - mMinLastModified <= MAX_ALIVE_TIME_MILLIS) {
+                        return;
+                    }
+                    mMinLastModified = Long.MAX_VALUE;
+
+                    Executors.io().execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            for (File file : files) {
+                                long lastModified = file.lastModified();
+                                if (currentTimeMillis - lastModified > MAX_ALIVE_TIME_MILLIS) {
+                                    file.delete();
+                                    if (mMinLastModified == Long.MAX_VALUE) {
+                                        mMinLastModified = currentTimeMillis;
+                                    }
+                                } else {
+                                    if (mMinLastModified > lastModified) {
+                                        mMinLastModified = lastModified;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    private String getFileName(String uri) {
+        int index = 0;
+        if (uri != null) {
+            index = uri.lastIndexOf('/');
+        }
+        if (index > 0) {
+            return uri.substring(index + 1);
+        } else {
+            return uri;
+        }
+    }
     @Override
     public void invokeMethod(String methodName, Map<String, Object> args) {
         if (METHOD_START.equals(methodName)) {
@@ -476,6 +665,8 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
             requestFullscreen(screenOrientation);
         } else if (METHOD_EXIT_FULLSCREEN.equals(methodName)) {
             exitFullscreen();
+        } else if (METHOD_SNAP_SHOT.equals(methodName)) {
+            snapshot(args);
         } else if (METHOD_GET_BOUNDING_CLIENT_RECT.equals(methodName)) {
             super.invokeMethod(methodName, args);
         }
@@ -502,11 +693,15 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
     @Override
     public void destroy() {
         super.destroy();
+        mIsDestroy = true;
         mLastPosition = -1;
         mCallback.removeActivityStateListener(this);
         if (mHost != null) {
             mHost.exitFullscreen();
             mHost.release();
+            if (mHost.mIsEverCacheVideo) {
+                VideoCacheManager.getInstance().removeCacheVideoData(getPageId(), mParseUriStr);
+            }
         }
     }
 
@@ -709,5 +904,12 @@ public class Video extends Component<FlexVideoView> implements SwipeObserver {
             default:
                 break;
         }
+    }
+
+    private void setSpeed(float speed) {
+        if (speed <= 0) {
+            speed = SPEED_DEFAULT;
+        }
+        mHost.setSpeed(speed);
     }
 }
